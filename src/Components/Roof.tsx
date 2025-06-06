@@ -1,9 +1,9 @@
 import React, { useMemo, useState, useRef } from 'react';
 import * as THREE from 'three';
 import { PivotControls } from '@react-three/drei';
+import { ThreeEvent, useThree } from '@react-three/fiber';
 import { EdgeResizeGrip } from './grips/EdgeResizeGrip';
 import { RotationGrip } from './grips/RotationGrip';
-import { PositionGrip } from './grips/PositionGrip';
 import { SizeGrip } from './grips/SizeGrip';
 import { DimensionAnnotation } from './annotations/DimensionAnnotation';
 import { ManualEdges } from './ManualEdges';
@@ -77,6 +77,11 @@ export const Roof: React.FC<RoofProps> = ({
   const [localPositionZ, setLocalPositionZ] = useState(positionZ);
   const [isEditing, setIsEditing] = useState(false);
   
+  // États pour le drag du mesh
+  const [isDraggingMesh, setIsDraggingMesh] = useState(false);
+  const isDraggingMeshRef = useRef(false);
+  const dragStartPointRef = useRef<THREE.Vector3 | null>(null);
+  
   // Références pour stocker les valeurs au début du drag
   const dragStartRef = React.useRef({
     length: 0,
@@ -88,18 +93,21 @@ export const Roof: React.FC<RoofProps> = ({
     positionZ: 0
   });
   
+  const { camera, raycaster } = useThree();
+  
   // Synchroniser avec les props externes SEULEMENT si on n'est pas en train d'éditer
   React.useEffect(() => {
     if (!isEditing) {
-      setLength(initialLength);
-      setWidth(initialWidth);
-      setLocalRoofHeight(roofHeight);
-      setLocalBaseHeight(baseHeight);
-      setLocalRotationY(rotationY);
-      setLocalPositionX(positionX);
-      setLocalPositionZ(positionZ);
+      // Ne synchroniser que si les props ont réellement changé
+      if (initialLength !== length) setLength(initialLength);
+      if (initialWidth !== width) setWidth(initialWidth);
+      if (roofHeight !== localRoofHeight) setLocalRoofHeight(roofHeight);
+      if (baseHeight !== localBaseHeight) setLocalBaseHeight(baseHeight);
+      if (rotationY !== localRotationY) setLocalRotationY(rotationY);
+      if (positionX !== localPositionX) setLocalPositionX(positionX);
+      if (positionZ !== localPositionZ) setLocalPositionZ(positionZ);
     }
-  }, [initialLength, initialWidth, roofHeight, baseHeight, rotationY, positionX, positionZ, isEditing]);
+  }, [initialLength, initialWidth, roofHeight, baseHeight, rotationY, positionX, positionZ, isEditing, length, width, localRoofHeight, localBaseHeight, localRotationY, localPositionX, localPositionZ]);
   
   const geometry = useMemo(() => {
     let geom = new THREE.BufferGeometry();
@@ -301,6 +309,102 @@ export const Roof: React.FC<RoofProps> = ({
     onBaseHeightChange?.(newBaseHeight);
   };
   
+  // Gestionnaires pour le drag du mesh
+  const getMousePosition = (clientX: number, clientY: number): THREE.Vector3 | null => {
+    const canvas = document.querySelector('canvas');
+    if (!canvas) return null;
+
+    const rect = canvas.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+
+    raycaster.setFromCamera(mouse, camera);
+    
+    // Plan horizontal au niveau Y = 0 pour le drag
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const intersectPoint = new THREE.Vector3();
+    
+    if (raycaster.ray.intersectPlane(plane, intersectPoint)) {
+      return intersectPoint;
+    }
+    
+    return null;
+  };
+
+  const handleMeshGlobalMouseMove = (event: MouseEvent) => {
+    if (!isDraggingMeshRef.current || !dragStartPointRef.current) return;
+    
+    const currentPoint = getMousePosition(event.clientX, event.clientY);
+    if (!currentPoint) return;
+    
+    // Calculer le déplacement total depuis le début du drag
+    const totalDeltaX = currentPoint.x - dragStartPointRef.current.x;
+    const totalDeltaZ = currentPoint.z - dragStartPointRef.current.z;
+    
+    // Mettre à jour les positions directement basées sur la position de départ
+    const newPositionX = dragStartRef.current.positionX + totalDeltaX;
+    const newPositionZ = dragStartRef.current.positionZ + totalDeltaZ;
+    
+    setLocalPositionX(newPositionX);
+    setLocalPositionZ(newPositionZ);
+    onPositionChange?.(newPositionX, newPositionZ);
+  };
+
+  const cleanupMeshListeners = () => {
+    window.removeEventListener('mousemove', handleMeshGlobalMouseMove);
+    window.removeEventListener('mouseup', handleMeshGlobalMouseUp);
+  };
+
+  const handleMeshGlobalMouseUp = () => {
+    if (!isDraggingMeshRef.current) return;
+    
+    isDraggingMeshRef.current = false;
+    dragStartPointRef.current = null;
+    setIsDraggingMesh(false);
+    
+    document.body.style.cursor = 'auto';
+    
+    handleGripEnd();
+    cleanupMeshListeners();
+  };
+
+  const handleMeshPointerDown = (event: ThreeEvent<PointerEvent>) => {
+    if (!showGrips) return; // Seulement actif quand les grips sont visibles
+    
+    event.stopPropagation();
+    isDraggingMeshRef.current = true;
+    dragStartPointRef.current = event.point;
+    setIsDraggingMesh(true);
+    
+    document.body.style.cursor = 'grabbing';
+    
+    handleGripStart();
+    
+    window.addEventListener('mousemove', handleMeshGlobalMouseMove);
+    window.addEventListener('mouseup', handleMeshGlobalMouseUp);
+  };
+
+  const handleMeshPointerEnter = () => {
+    if (showGrips && !isDraggingMesh) {
+      document.body.style.cursor = 'grab';
+    }
+  };
+
+  const handleMeshPointerLeave = () => {
+    if (!isDraggingMesh) {
+      document.body.style.cursor = 'auto';
+    }
+  };
+
+  // Cleanup des listeners du mesh
+  React.useEffect(() => {
+    return () => {
+      cleanupMeshListeners();
+    };
+  }, []);
+  
   const handleGripStart = () => {
     // Stocker les valeurs de référence au début du drag
     dragStartRef.current = {
@@ -463,6 +567,9 @@ export const Roof: React.FC<RoofProps> = ({
         castShadow={false}
         receiveShadow={false}
         geometry={geometry}
+        onPointerDown={handleMeshPointerDown}
+        onPointerEnter={handleMeshPointerEnter}
+        onPointerLeave={handleMeshPointerLeave}
       >
         <meshStandardMaterial 
           transparent
@@ -620,14 +727,7 @@ export const Roof: React.FC<RoofProps> = ({
             color={0xFFA500}
           />
           
-          {/* Grip de position (déplacement XZ) */}
-          <PositionGrip
-            position={gripPositions.position}
-            onDrag={handlePositionChange}
-            onDragStart={handleGripStart}
-            onDragEnd={handleGripEnd}
-            radius={0.2}
-          />
+          {/* Grip de position retiré - maintenant géré directement sur le mesh */}
           
           {/* Contrôleur de scale pour la hauteur de base */}
           <PivotControls
